@@ -4,6 +4,8 @@ import Quiz from '../models/Quiz.js';
 import Performance from '../models/Performance.js';
 import { summariseNotes, generateQuiz, explainConcept, generateFlashcards } from '../utils/ai.js';
 import { audit } from '../utils/audit.js';
+import { chunkText, estimateTokens } from '../utils/chunking.js';
+import { extractKeyTerms } from '../utils/vector.js';
 
 // POST /api/notes/upload — auth + multer middleware applied in router
 export async function uploadNote(req, res, next) {
@@ -31,11 +33,21 @@ export async function uploadNote(req, res, next) {
       return res.status(400).json({ error: 'No content provided — upload a file or paste text' });
     }
 
-    // Cap input length to protect token usage
+    // Cap input length to protect token usage (max ~40k chars = ~10k tokens)
     const MAX_CHARS = 40000;
     const text = rawText.slice(0, MAX_CHARS);
 
-    const ai = await summariseNotes(text);
+    // Process document in chunks if large
+    const chunks = chunkText(text, 2000, 200);
+    const chunkData = chunks.map((chunk, index) => ({
+      text: chunk,
+      index,
+      keyTerms: extractKeyTerms(chunk, 10)
+    }));
+
+    // For summarization, use first few chunks or full text if small
+    const summaryText = text.length <= 8000 ? text : chunks.slice(0, 4).join('\n\n');
+    const ai = await summariseNotes(summaryText);
     const subject = ai.subject || 'General';
 
     const note = await Note.create({
@@ -45,14 +57,16 @@ export async function uploadNote(req, res, next) {
       summary: ai.summary || '',
       topics: Array.isArray(ai.topics) ? ai.topics : [],
       keyPoints: Array.isArray(ai.keyPoints) ? ai.keyPoints : [],
-      subject
+      subject,
+      chunks: chunkData,
+      totalChunks: chunks.length
     });
 
     await audit(req, 'note.upload', `${note.subject} — ${note.title}`);
 
     let quiz = null;
     try {
-      // FEATURE 5: pick difficulty from the user's average score
+      // Pick difficulty from the user's average score
       const records = await Performance.find({ userId: req.user.id }).select('totalScore totalQuestions');
       const totalQ = records.reduce((a, r) => a + r.totalQuestions, 0);
       const totalS = records.reduce((a, r) => a + r.totalScore, 0);
@@ -64,6 +78,7 @@ export async function uploadNote(req, res, next) {
         else if (avgScore >= 75) difficulty = 'hard';
       }
 
+      // Generate quiz from summary + topics (not full text)
       const generated = await generateQuiz(note.summary, note.topics, 10, difficulty);
       const questions = Array.isArray(generated.questions) ? generated.questions : [];
       quiz = await Quiz.create({
