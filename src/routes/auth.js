@@ -8,6 +8,45 @@ import Note from '../models/Note.js';
 import Quiz from '../models/Quiz.js';
 import Performance from '../models/Performance.js';
 import { auth } from '../middleware/auth.js';
+import { audit } from '../utils/audit.js';
+
+// Minimal Google ID-token verification using the public JWKS from Google.
+// We avoid a heavy SDK: fetch keys, verify with jsonwebtoken, check iss/aud.
+const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
+let googleKeysCache = null;
+let googleKeysFetchedAt = 0;
+const GOOGLE_KEYS_TTL = 60 * 60 * 1000; // 1 hour
+
+async function getGoogleKeys() {
+  const now = Date.now();
+  if (googleKeysCache && now - googleKeysFetchedAt < GOOGLE_KEYS_TTL) {
+    return googleKeysCache;
+  }
+  const res = await fetch(GOOGLE_JWKS_URL);
+  if (!res.ok) throw new Error('Failed to fetch Google keys');
+  const jwks = await res.json();
+  googleKeysCache = jwks.keys;
+  googleKeysFetchedAt = now;
+  return googleKeysCache;
+}
+
+async function verifyGoogleCredential(credential) {
+  const keys = await getGoogleKeys();
+  const header = JSON.parse(Buffer.from(credential.split('.')[0], 'base64url').toString());
+  const key = keys.find((k) => k.kid === header.kid);
+  if (!key) throw new Error('Google key not found');
+
+  const payload = jwt.verify(credential, key, {
+    algorithms: ['RS256'],
+    issuer: ['https://accounts.google.com', 'accounts.google.com']
+  });
+
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  if (clientId && payload.aud !== clientId) {
+    throw new Error('Google token audience mismatch');
+  }
+  return payload;
+}
 
 const router = Router();
 
@@ -20,6 +59,41 @@ function signToken(user) {
 function publicUser(user) {
   return { id: user._id, name: user.name, email: user.email, role: user.role, subjects: user.subjects || [] };
 }
+
+// POST /api/auth/google — sign in/up with a Google ID token
+router.post('/google', async (req, res, next) => {
+  try {
+    const { credential } = req.body;
+    if (!credential) {
+      return res.status(400).json({ error: 'Google credential is required' });
+    }
+
+    const payload = await verifyGoogleCredential(credential);
+    const email = (payload.email || '').toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: 'Google account has no email' });
+    }
+
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = await User.create({
+        name: payload.name || email.split('@')[0],
+        email,
+        passwordHash: '', // Google users have no password
+        subjects: []
+      });
+      await audit(req, 'auth.google_register', email);
+    } else {
+      await audit(req, 'auth.google_login', email);
+    }
+
+    const token = signToken(user);
+    res.json({ data: { token, user: publicUser(user) } });
+  } catch (err) {
+    console.error('Google auth failed:', err.message);
+    res.status(401).json({ error: 'Google sign-in failed: ' + err.message });
+  }
+});
 
 // GET /api/auth/me — current profile (view)
 router.get('/me', auth, async (req, res, next) => {
@@ -88,6 +162,7 @@ router.delete('/me', auth, async (req, res, next) => {
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
+    await audit(req, 'account.delete', user.email);
     // Best-effort cleanup of the user's study data
     await Promise.allSettled([
       Note.deleteMany({ userId: req.user.id }),
@@ -125,6 +200,7 @@ router.post(
       const user = await User.create({ name, email, passwordHash });
 
       const token = signToken(user);
+      await audit(req, 'auth.register', email);
       res.status(201).json({ data: { token, user: publicUser(user) } });
     } catch (err) {
       next(err);
@@ -158,6 +234,7 @@ router.post(
       }
 
       const token = signToken(user);
+      await audit(req, 'auth.login', email);
       res.json({ data: { token, user: publicUser(user) } });
     } catch (err) {
       next(err);

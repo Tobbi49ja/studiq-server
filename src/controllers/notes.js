@@ -3,6 +3,7 @@ import Note from '../models/Note.js';
 import Quiz from '../models/Quiz.js';
 import Performance from '../models/Performance.js';
 import { summariseNotes, generateQuiz, explainConcept, generateFlashcards } from '../utils/ai.js';
+import { audit } from '../utils/audit.js';
 
 // POST /api/notes/upload — auth + multer middleware applied in router
 export async function uploadNote(req, res, next) {
@@ -46,6 +47,8 @@ export async function uploadNote(req, res, next) {
       keyPoints: Array.isArray(ai.keyPoints) ? ai.keyPoints : [],
       subject
     });
+
+    await audit(req, 'note.upload', `${note.subject} — ${note.title}`);
 
     let quiz = null;
     try {

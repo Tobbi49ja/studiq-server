@@ -6,7 +6,45 @@ import path from 'path'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.resolve(__dirname, '../../.env') })
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY })
+// Support multiple Groq keys — rotate to the next one when the current key is
+// rate-limited. GROQ_API_KEY is the primary; GROQ_API_KEY_2.._N are fallbacks.
+const groqKeys = [
+  process.env.GROQ_API_KEY,
+  process.env.GROQ_API_KEY_2,
+  process.env.GROQ_API_KEY_3,
+  process.env.GROQ_API_KEY_4
+].filter(Boolean)
+
+const clients = groqKeys.map((apiKey) => new Groq({ apiKey }))
+let keyIndex = 0
+
+function currentClient() {
+  return clients[keyIndex % clients.length]
+}
+
+function isRateLimit(err) {
+  const status = err?.status || err?.response?.status
+  return status === 429 || /rate.?limit/i.test(String(err?.message || ''))
+}
+
+// Call the given chat.completions.create with key rotation: on a 429 rate-limit
+// error, advance to the next key and retry once.
+async function createWithRotation(params) {
+  for (let attempt = 0; attempt < clients.length; attempt++) {
+    try {
+      const res = await currentClient().chat.completions.create(params)
+      return res
+    } catch (err) {
+      if (isRateLimit(err)) {
+        keyIndex = (keyIndex + 1) % clients.length
+        console.warn(`Groq rate limit — rotating to key ${keyIndex + 1}/${clients.length}`)
+        continue
+      }
+      throw err
+    }
+  }
+  throw new Error('All Groq API keys are rate-limited or exhausted')
+}
 
 // Strip the model's <think> reasoning block (including unclosed ones),
 // markdown code fences, then extract the first valid JSON object from the reply
@@ -90,7 +128,7 @@ function stripReasoning(raw) {
 }
 
 export async function summariseNotes(rawText) {
-  const res = await groq.chat.completions.create({
+  const res = await createWithRotation({
     model: 'qwen/qwen3.6-27b',
     messages: [{
       role: 'user',
@@ -120,7 +158,7 @@ ${rawText}`
 }
 
 export async function generateQuiz(summary, topics, count = 10, difficulty = 'medium') {
-  const res = await groq.chat.completions.create({
+  const res = await createWithRotation({
     model: 'qwen/qwen3.6-27b',
     messages: [{
       role: 'user',
@@ -165,7 +203,7 @@ Topics: ${topics.join(', ')}`
 }
 
 export async function explainConcept(concept, subject) {
-  const res = await groq.chat.completions.create({
+  const res = await createWithRotation({
     model: 'qwen/qwen3.6-27b',
     messages: [{
       role: 'user',
@@ -191,7 +229,7 @@ Rules:
 }
 
 export async function generateFlashcards(keyPoints, subject) {
-  const res = await groq.chat.completions.create({
+  const res = await createWithRotation({
     model: 'qwen/qwen3.6-27b',
     messages: [{
       role: 'user',
@@ -218,7 +256,7 @@ Subject: ${subject}`
 }
 
 export async function generateFeedback(question, correctAnswer, userAnswer, explanation) {
-  const res = await groq.chat.completions.create({
+  const res = await createWithRotation({
     model: 'qwen/qwen3.6-27b',
     messages: [{
       role: 'user',
@@ -243,7 +281,7 @@ Rules:
 }
 
 export async function generateStudyPlan(weakTopics, subjects, daysAvailable) {
-  const res = await groq.chat.completions.create({
+  const res = await createWithRotation({
     model: 'qwen/qwen3.6-27b',
     messages: [{
       role: 'user',
@@ -284,7 +322,7 @@ Return JSON only:
 // Ask Studiq AI an open academic question, grounded in the student's history
 // (subjects, recent topics, and quiz performance) when available.
 export async function askStudiqAI(question, context) {
-  const res = await groq.chat.completions.create({
+  const res = await createWithRotation({
     model: 'qwen/qwen3.6-27b',
     messages: [
       {

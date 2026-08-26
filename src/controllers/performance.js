@@ -2,6 +2,7 @@ import Performance from '../models/Performance.js';
 import Quiz from '../models/Quiz.js';
 import Note from '../models/Note.js';
 import { generateStudyPlan } from '../utils/ai.js';
+import { audit } from '../utils/audit.js';
 
 // POST /api/performance — grade answers, save record
 export async function submitPerformance(req, res, next) {
@@ -48,6 +49,8 @@ export async function submitPerformance(req, res, next) {
       totalQuestions: total,
       timeTakenSeconds: timeTakenSeconds || 0
     });
+
+    await audit(req, 'quiz.complete', `${subject || 'General'} ${correctCount}/${total}`);
 
     res.status(201).json({
       data: {

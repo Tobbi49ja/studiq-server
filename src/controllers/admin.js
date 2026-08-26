@@ -2,6 +2,8 @@ import User from '../models/User.js';
 import Note from '../models/Note.js';
 import Quiz from '../models/Quiz.js';
 import Performance from '../models/Performance.js';
+import AuditLog from '../models/AuditLog.js';
+import { audit } from '../utils/audit.js';
 
 // GET /api/admin/stats — platform-wide aggregate numbers
 export async function getStats(req, res, next) {
@@ -75,6 +77,7 @@ export async function updateUserRole(req, res, next) {
 
     user.role = role;
     await user.save();
+    await audit(req, 'admin.role_change', `${user.email} -> ${role}`);
     res.json({ data: { id: user._id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     next(err);
@@ -88,6 +91,7 @@ export async function deleteUser(req, res, next) {
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
+    await audit(req, 'admin.delete_user', user.email);
     await Promise.allSettled([
       Note.deleteMany({ userId: user._id }),
       Quiz.deleteMany({ userId: user._id }),
@@ -131,8 +135,22 @@ export async function deleteNote(req, res, next) {
     if (!note) {
       return res.status(404).json({ error: 'Note not found' });
     }
+    await audit(req, 'admin.delete_note', note.title);
     await Quiz.deleteMany({ noteId: note._id });
     res.json({ data: { success: true } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/admin/audit — recent audit log entries
+export async function listAudit(req, res, next) {
+  try {
+    const logs = await AuditLog.find()
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .select('userId email action detail ip createdAt');
+    res.json({ data: logs });
   } catch (err) {
     next(err);
   }
