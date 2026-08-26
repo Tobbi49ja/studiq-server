@@ -52,10 +52,20 @@ async function createWithRotation(params) {
 // opening tag, so both plain-text and JSON replies never expose the trace.
 function stripThinking(raw) {
   let text = String(raw || '')
+  // Remove complete <think>...</think> / <thinking>...</thinking> blocks.
   text = text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '')
-  const open = text.match(/<thinking/gi)
+  // Cut at any unclosed opening tag (handles truncated responses).
+  const open = text.match(/<think(?:ing)?>/gi)
   if (open) text = text.slice(0, text.indexOf(open[0]))
-  return text.replace(/<\/?thinking?>/gi, '').trim()
+  // Remove any leftover standalone tag remnants.
+  text = text.replace(/<\/?think(?:ing)?>/gi, '')
+  // Cut at bare "Thinking:"/"thought process" preambles with no angle brackets.
+  const cutMatch = text.match(/^thinking\b/gi)
+  if (cutMatch) {
+    const nl = text.indexOf('\n')
+    text = nl >= 0 ? text.slice(nl + 1).trim() : ''
+  }
+  return text.trim()
 }
 
 function extractJson(raw) {
@@ -152,6 +162,7 @@ Notes:
 ${rawText}`
     }],
     temperature: 0.3,
+    reasoning_effort: 'none',
     max_tokens: 2048
   })
   return extractJson(res.choices[0].message.content)
@@ -191,6 +202,7 @@ Summary: ${summary}
 Topics: ${topics.join(', ')}`
     }],
     temperature: 0.5,
+    reasoning_effort: 'none',
     max_tokens: 3000
   })
   const result = extractJson(res.choices[0].message.content)
@@ -223,6 +235,7 @@ Rules:
 - Return the final answer only, as plain text, no JSON, no markdown.`
     }],
     temperature: 0.3,
+    reasoning_effort: 'none',
     max_tokens: 4000
   })
   return stripReasoning(res.choices[0].message.content)
@@ -244,6 +257,7 @@ Key points: ${keyPoints.join(', ')}
 Subject: ${subject}`
     }],
     temperature: 0.3,
+    reasoning_effort: 'none',
     max_tokens: 2000
   })
   const result = extractJson(res.choices[0].message.content)
@@ -275,6 +289,7 @@ Rules:
 - Return the final answer only, no JSON, no markdown.`
     }],
     temperature: 0.4,
+    reasoning_effort: 'none',
     max_tokens: 4000
   })
   return stripReasoning(res.choices[0].message.content)
@@ -308,6 +323,7 @@ Return JSON only:
 }`
     }],
     temperature: 0.4,
+    reasoning_effort: 'none',
     max_tokens: 2000
   })
   const result = extractJson(res.choices[0].message.content)
@@ -357,6 +373,7 @@ Rules:
       }
     ],
     temperature: 0.6,
+    reasoning_effort: 'none',
     max_tokens: 1024
   })
   return stripReasoning(res.choices[0].message.content).trim()
