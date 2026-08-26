@@ -14,4 +14,23 @@ router.get('/notes', listNotes);
 router.delete('/notes/:id', deleteNote);
 router.get('/audit', listAudit);
 
+// Settings management
+router.get('/settings', async (req, res, next) => {
+  try {
+    const Setting = (await import('../models/Setting.js')).default;
+    const settings = await Setting.find().select('key value updatedAt');
+    const result = {};
+    settings.forEach((s) => { result[s.key] = s.value; });
+    res.json({ data: result });
+  } catch (err) { next(err); }
+});
+
+router.put('/settings/:key', async (req, res, next) => {
+  try {
+    const Setting = (await import('../models/Setting.js')).default;
+    const doc = await Setting.set(req.params.key, req.body.value);
+    res.json({ data: { key: doc.key, value: doc.value } });
+  } catch (err) { next(err); }
+});
+
 export default router;

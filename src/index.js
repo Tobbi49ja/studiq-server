@@ -33,6 +33,18 @@ app.use('/api/quiz', quizRoutes);
 app.use('/api/performance', performanceRoutes);
 app.use('/api/subjects', subjectRoutes);
 app.use('/api/ask', askRoutes);
+
+// Public site settings (contact info, etc.)
+app.get('/api/settings', async (req, res, next) => {
+  try {
+    const Setting = (await import('./models/Setting.js')).default;
+    const settings = await Setting.find().select('key value');
+    const result = {};
+    settings.forEach((s) => { result[s.key] = s.value; });
+    res.json({ data: result });
+  } catch (err) { next(err); }
+});
+
 app.use('/api/admin', adminRoutes);
 
 // 404 for unknown routes
