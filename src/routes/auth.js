@@ -32,10 +32,6 @@ async function verifyGoogleCredential(credential) {
   return ticket.getPayload();
 }
 
-const router = Router();
-
-const JWT_SECRET = process.env.JWT_SECRET || 'studiq_secret_2026';
-
 function signToken(user) {
   return jwt.sign({ id: user._id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
 }
