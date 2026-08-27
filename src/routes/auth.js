@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { body, validationResult } from 'express-validator';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 import User from '../models/User.js';
 import Note from '../models/Note.js';
@@ -11,7 +12,7 @@ import { auth } from '../middleware/auth.js';
 import { audit } from '../utils/audit.js';
 
 // Minimal Google ID-token verification using the public JWKS from Google.
-// We avoid a heavy SDK: fetch keys, verify with jsonwebtoken, check iss/aud.
+// We avoid a heavy SDK: fetch keys, convert to PEM, verify with jsonwebtoken, check iss/aud.
 const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
 let googleKeysCache = null;
 let googleKeysFetchedAt = 0;
@@ -30,13 +31,93 @@ async function getGoogleKeys() {
   return googleKeysCache;
 }
 
+// Convert JWK to PEM format for jwt.verify
+function jwkToPem(jwk) {
+  const modulus = Buffer.from(jwk.n, 'base64url');
+  const exponent = Buffer.from(jwk.e, 'base64url');
+  
+  const algorithm = {
+    name: 'RSASSA-PKCS1-v1_5',
+    hash: { name: 'SHA-256' },
+    modulusLength: modulus.length * 8,
+    publicExponent: new Uint8Array(exponent),
+  };
+
+  const keyData = {
+    kty: 'RSA',
+    n: jwk.n,
+    e: jwk.e,
+    alg: 'RS256',
+    kid: jwk.kid,
+    use: 'sig',
+  };
+
+  // Build PEM from n and e
+  const nBuf = Buffer.from(jwk.n, 'base64url');
+  const eBuf = Buffer.from(jwk.e, 'base64url');
+  
+  // ASN.1 structure for RSA public key
+  const asn1 = encodeASN1(nBuf, eBuf);
+  const pem = `-----BEGIN PUBLIC KEY-----\n${asn1.toString('base64').match(/.{1,64}/g).join('\n')}\n-----END PUBLIC KEY-----`;
+  return pem;
+}
+
+function encodeASN1(n, e) {
+  // Encode RSA public key in PKCS#1 format
+  const nLen = n.length;
+  const eLen = e.length;
+  
+  // Calculate total length
+  const totalLen = 2 + nLen + 2 + eLen;
+  const hasNHighBit = n[0] >= 0x80;
+  const hasEHighBit = e[0] >= 0x80;
+  
+  const nFieldLen = hasNHighBit ? nLen + 1 : nLen;
+  const eFieldLen = hasEHighBit ? eLen + 1 : eLen;
+  const seqLen = 2 + nFieldLen + 2 + eFieldLen;
+  
+  const buf = Buffer.alloc(2 + (seqLen >= 0x80 ? 2 : 0) + seqLen);
+  let offset = 0;
+  
+  // SEQUENCE tag
+  buf[offset++] = 0x30;
+  
+  // Length
+  if (seqLen >= 0x80) {
+    buf[offset++] = 0x81;
+    buf[offset++] = seqLen;
+  } else {
+    buf[offset++] = seqLen;
+  }
+  
+  // INTEGER n
+  buf[offset++] = 0x02;
+  if (hasNHighBit) {
+    buf[offset++] = nFieldLen;
+    buf[offset++] = 0x00;
+  } else {
+    buf[offset++] = nFieldLen;
+  }
+  n.copy(buf, offset);
+  offset += nLen;
+  
+  // INTEGER e
+  buf[offset++] = 0x02;
+  buf[offset++] = eFieldLen;
+  if (hasEHighBit) buf[offset++] = 0x00;
+  e.copy(buf, offset);
+  
+  return buf;
+}
+
 async function verifyGoogleCredential(credential) {
   const keys = await getGoogleKeys();
   const header = JSON.parse(Buffer.from(credential.split('.')[0], 'base64url').toString());
   const key = keys.find((k) => k.kid === header.kid);
   if (!key) throw new Error('Google key not found');
 
-  const payload = jwt.verify(credential, key, {
+  const pem = jwkToPem(key);
+  const payload = jwt.verify(credential, pem, {
     algorithms: ['RS256'],
     issuer: ['https://accounts.google.com', 'accounts.google.com']
   });
