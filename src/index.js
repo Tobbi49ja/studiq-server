@@ -9,6 +9,7 @@ import quizRoutes from './routes/quiz.js';
 import performanceRoutes from './routes/performance.js';
 import subjectRoutes from './routes/subjects.js';
 import askRoutes from './routes/ask.js';
+import contactRoutes from './routes/contact.js';
 import adminRoutes from './routes/admin.js';
 
 dotenv.config();
@@ -33,6 +34,7 @@ app.use('/api/quiz', quizRoutes);
 app.use('/api/performance', performanceRoutes);
 app.use('/api/subjects', subjectRoutes);
 app.use('/api/ask', askRoutes);
+app.use('/api/contact', contactRoutes);
 
 // Public site settings (contact info, etc.)
 app.get('/api/settings', async (req, res, next) => {

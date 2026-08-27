@@ -33,4 +33,29 @@ router.put('/settings/:key', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Contact messages
+router.get('/messages', async (req, res, next) => {
+  try {
+    const Message = (await import('../models/Message.js')).default;
+    const messages = await Message.find().sort({ createdAt: -1 });
+    res.json({ data: messages });
+  } catch (err) { next(err); }
+});
+
+router.patch('/messages/:id/read', async (req, res, next) => {
+  try {
+    const Message = (await import('../models/Message.js')).default;
+    const msg = await Message.findByIdAndUpdate(req.params.id, { read: true }, { new: true });
+    res.json({ data: msg });
+  } catch (err) { next(err); }
+});
+
+router.delete('/messages/:id', async (req, res, next) => {
+  try {
+    const Message = (await import('../models/Message.js')).default;
+    await Message.findByIdAndDelete(req.params.id);
+    res.json({ data: { success: true } });
+  } catch (err) { next(err); }
+});
+
 export default router;
