@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import Message from '../models/Message.js';
+import { audit } from '../utils/audit.js';
 
 const router = Router();
 
@@ -13,6 +14,7 @@ router.post('/', async (req, res, next) => {
     }
 
     const msg = await Message.create({ name, email, message });
+    await audit(req, 'contact.submit', `${name} (${email})`);
     res.status(201).json({ data: { id: msg._id, success: true } });
   } catch (err) {
     next(err);

@@ -9,7 +9,7 @@ import Note from '../models/Note.js';
 import Quiz from '../models/Quiz.js';
 import Performance from '../models/Performance.js';
 import { auth } from '../middleware/auth.js';
-import { audit } from '../utils/audit.js';
+import { audit, auditLogin, auditRegister, auditProfileUpdate, auditSecurity } from '../utils/audit.js';
 
 const router = Router();
 
@@ -59,18 +59,19 @@ router.post('/google', async (req, res, next) => {
       user = await User.create({
         name: payload.name || email.split('@')[0],
         email,
-        passwordHash: '', // Google users have no password
+        passwordHash: '',
         subjects: []
       });
-      await audit(req, 'auth.google_register', email);
+      await auditRegister(req, email, 'google');
     } else {
-      await audit(req, 'auth.google_login', email);
+      await auditLogin(req, email, true);
     }
 
     const token = signToken(user);
     res.json({ data: { token, user: publicUser(user) } });
   } catch (err) {
     console.error('Google auth failed:', err.message);
+    await auditSecurity(req, 'google_auth_failed', err.message);
     res.status(401).json({ error: 'Google sign-in failed: ' + err.message });
   }
 });
@@ -110,6 +111,7 @@ router.put(
       }
 
       const { name, email, password } = req.body;
+      const updatedFields = [];
 
       if (email !== undefined && email.toLowerCase() !== user.email.toLowerCase()) {
         const existing = await User.findOne({ email });
@@ -117,17 +119,23 @@ router.put(
           return res.status(409).json({ error: 'Email already registered' });
         }
         user.email = email;
+        updatedFields.push('email');
       }
 
       if (name !== undefined && name.trim()) {
         user.name = name.trim();
+        updatedFields.push('name');
       }
 
       if (password) {
         user.passwordHash = await bcrypt.hash(password, 10);
+        updatedFields.push('password');
       }
 
       await user.save();
+      if (updatedFields.length) {
+        await auditProfileUpdate(req, user.email, updatedFields);
+      }
       res.json({ data: publicUser(user) });
     } catch (err) {
       next(err);
@@ -180,7 +188,7 @@ router.post(
       const user = await User.create({ name, email, passwordHash });
 
       const token = signToken(user);
-      await audit(req, 'auth.register', email);
+      await auditRegister(req, email, 'email');
       res.status(201).json({ data: { token, user: publicUser(user) } });
     } catch (err) {
       next(err);
@@ -205,21 +213,29 @@ router.post(
       const { email, password } = req.body;
       const user = await User.findOne({ email });
       if (!user) {
+        await auditLogin(req, email, false, 'user_not_found');
         return res.status(401).json({ error: 'Invalid email or password' });
       }
 
       const valid = await bcrypt.compare(password, user.passwordHash);
       if (!valid) {
+        await auditLogin(req, email, false, 'wrong_password');
         return res.status(401).json({ error: 'Invalid email or password' });
       }
 
       const token = signToken(user);
-      await audit(req, 'auth.login', email);
+      await auditLogin(req, email, true);
       res.json({ data: { token, user: publicUser(user) } });
     } catch (err) {
       next(err);
     }
   }
 );
+
+// POST /api/auth/logout
+router.post('/logout', auth, async (req, res) => {
+  await audit(req, 'auth.logout', req.user.email);
+  res.json({ data: { success: true } });
+});
 
 export default router;

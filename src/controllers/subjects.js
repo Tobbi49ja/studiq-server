@@ -1,4 +1,5 @@
 import User from '../models/User.js';
+import { audit } from '../utils/audit.js';
 
 // GET /api/subjects — list the user's saved subjects
 export async function getSubjects(req, res, next) {
@@ -34,6 +35,7 @@ export async function addSubject(req, res, next) {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    await audit(req, 'subject.add', name);
     res.status(201).json({ data: user.subjects });
   } catch (err) {
     next(err);

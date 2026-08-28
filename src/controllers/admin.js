@@ -143,14 +143,24 @@ export async function deleteNote(req, res, next) {
   }
 }
 
-// GET /api/admin/audit — recent audit log entries
+// GET /api/admin/audit — recent audit log entries with optional filtering
 export async function listAudit(req, res, next) {
   try {
-    const logs = await AuditLog.find()
+    const { action, email, status, limit = 200, skip = 0 } = req.query;
+    const filter = {};
+    if (action) filter.action = new RegExp(action, 'i');
+    if (email) filter.email = new RegExp(email, 'i');
+    if (status) filter.status = status;
+
+    const logs = await AuditLog.find(filter)
       .sort({ createdAt: -1 })
-      .limit(200)
-      .select('userId email action detail ip createdAt');
-    res.json({ data: logs });
+      .limit(Math.min(parseInt(limit) || 200, 500))
+      .skip(parseInt(skip) || 0)
+      .select('userId email action detail ip userAgent status reason createdAt');
+
+    const total = await AuditLog.countDocuments(filter);
+
+    res.json({ data: logs, total, limit: parseInt(limit) || 200, skip: parseInt(skip) || 0 });
   } catch (err) {
     next(err);
   }
