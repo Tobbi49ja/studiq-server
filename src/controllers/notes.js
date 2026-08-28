@@ -48,7 +48,23 @@ export async function uploadNote(req, res, next) {
     // For summarization, use first few chunks or full text if small
     const summaryText = text.length <= 8000 ? text : chunks.slice(0, 4).join('\n\n');
     const ai = await summariseNotes(summaryText);
-    const subject = ai.subject || 'General';
+    const detectedSubject = ai.subject || 'General';
+
+    // Subject verification: compare user-selected subject with AI-detected
+    const userSelectedSubject = req.body.subject?.trim() || '';
+    let finalSubject = detectedSubject;
+    let subjectMismatch = false;
+
+    if (userSelectedSubject) {
+      if (userSelectedSubject.toLowerCase() === detectedSubject.toLowerCase()) {
+        // Exact match — use student's selected subject
+        finalSubject = userSelectedSubject;
+      } else {
+        // Mismatch — AI overrides with detected subject
+        finalSubject = detectedSubject;
+        subjectMismatch = true;
+      }
+    }
 
     const note = await Note.create({
       userId: req.user.id,
@@ -57,7 +73,7 @@ export async function uploadNote(req, res, next) {
       summary: ai.summary || '',
       topics: Array.isArray(ai.topics) ? ai.topics : [],
       keyPoints: Array.isArray(ai.keyPoints) ? ai.keyPoints : [],
-      subject,
+      subject: finalSubject,
       chunks: chunkData,
       totalChunks: chunks.length
     });
@@ -106,6 +122,11 @@ export async function uploadNote(req, res, next) {
           topics: note.topics,
           summary: note.summary
         },
+        subjectVerification: userSelectedSubject ? {
+          selected: userSelectedSubject,
+          detected: detectedSubject,
+          mismatch: subjectMismatch
+        } : null,
         quiz: quiz
           ? { _id: quiz._id, questions: quiz.questions }
           : null
