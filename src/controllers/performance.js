@@ -1,6 +1,7 @@
 import Performance from '../models/Performance.js';
 import Quiz from '../models/Quiz.js';
 import Note from '../models/Note.js';
+import StudyPlan from '../models/StudyPlan.js';
 import { generateStudyPlan } from '../utils/ai.js';
 import { audit } from '../utils/audit.js';
 
@@ -151,6 +152,34 @@ export async function getHistory(req, res, next) {
 export async function generatePlan(req, res, next) {
   try {
     const daysAvailable = Math.min(Math.max(parseInt(req.body.daysAvailable, 10) || 7, 1), 30);
+    const mode = ['subject', 'all', 'ai', 'topic'].includes(req.body.mode) ? req.body.mode : 'all';
+    const selectedSubject = (req.body.selectedSubject || '').trim();
+    const customTopic = (req.body.customTopic || '').trim();
+    const forceRegenerate = req.body.forceRegenerate === true;
+
+    if (!forceRegenerate) {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const existing = await StudyPlan.findOne({
+        userId: req.user.id,
+        mode,
+        selectedSubject,
+        customTopic,
+        createdAt: { $gte: todayStart }
+      }).sort({ createdAt: -1 });
+      if (existing) {
+        return res.json({
+          data: {
+            daysAvailable: existing.daysAvailable,
+            weakTopics: existing.weakTopics,
+            subjects: existing.subjects,
+            plan: existing.plan,
+            createdAt: existing.createdAt,
+            fromCache: true
+          }
+        });
+      }
+    }
 
     const records = await Performance.find({ userId: req.user.id }).select('subject topicScores totalScore totalQuestions');
     const subjectMap = new Map();
@@ -186,19 +215,44 @@ export async function generatePlan(req, res, next) {
       }
     }
 
-    if (!weakTopics.length) {
+    if (mode === 'topic' && customTopic && !weakTopics.length) {
+      weakTopics.push(customTopic);
+      subjects.push(customTopic);
+    }
+
+    if (!weakTopics.length && mode !== 'topic') {
       return res.status(400).json({ error: 'No quiz history yet — take a quiz first so Studiq can build your study plan' });
     }
 
-    const generated = await generateStudyPlan(weakTopics.slice(0, 12), subjects, daysAvailable);
+    const generated = await generateStudyPlan(
+      weakTopics.slice(0, 12),
+      subjects,
+      daysAvailable,
+      mode,
+      selectedSubject,
+      customTopic
+    );
     const plan = Array.isArray(generated.plan) ? generated.plan : [];
+
+    const saved = await StudyPlan.create({
+      userId: req.user.id,
+      mode,
+      selectedSubject,
+      customTopic,
+      daysAvailable,
+      weakTopics,
+      subjects,
+      plan
+    });
 
     res.json({
       data: {
-        daysAvailable,
-        weakTopics,
-        subjects,
-        plan
+        daysAvailable: saved.daysAvailable,
+        weakTopics: saved.weakTopics,
+        subjects: saved.subjects,
+        plan: saved.plan,
+        createdAt: saved.createdAt,
+        fromCache: false
       }
     });
   } catch (err) {

@@ -295,15 +295,13 @@ Rules:
   return stripReasoning(res.choices[0].message.content)
 }
 
-export async function generateStudyPlan(weakTopics, subjects, daysAvailable) {
-  const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
-    messages: [{
-      role: 'user',
-      content: `Create a ${daysAvailable}-day personalised 
-study plan for a student preparing for WAEC/JAMB.
-Weak topics: ${weakTopics.join(', ')}
-Subjects: ${subjects.join(', ')}
+export async function generateStudyPlan(weakTopics, subjects, daysAvailable, mode = 'all', selectedSubject = '', customTopic = '') {
+  let prompt = '';
+
+  if (mode === 'subject' && selectedSubject) {
+    prompt = `Create a ${daysAvailable}-day personalised study plan for a student preparing for WAEC/JAMB.
+Focus entirely on: ${selectedSubject}
+Weak topics in this subject: ${weakTopics.filter((_, i) => subjects[i] === selectedSubject || subjects.includes(selectedSubject)).join(', ') || weakTopics.join(', ')}
 Return JSON only:
 {
   "plan": [
@@ -312,22 +310,124 @@ Return JSON only:
       "date": "Monday",
       "sessions": [
         {
-          "subject": "Chemistry",
-          "topic": "Alkanes",
+          "subject": "${selectedSubject}",
+          "topic": "Topic name",
           "duration": "45 mins",
           "activity": "Review notes + take quiz"
         }
       ]
     }
   ]
-}`
+}
+
+Rules:
+- All sessions must be for ${selectedSubject}
+- Focus on weak topics first, then strengthen good areas
+- Vary activities: review, quiz, flashcards, past questions
+- Keep sessions 30-60 mins
+- Include rest days if ${daysAvailable} >= 7`;
+  } else if (mode === 'topic' && customTopic) {
+    prompt = `Create a ${daysAvailable}-day personalised study plan for a student preparing for WAEC/JAMB.
+Focus entirely on this topic: ${customTopic}
+The student wants to master this specific area.
+Return JSON only:
+{
+  "plan": [
+    {
+      "day": 1,
+      "date": "Monday",
+      "sessions": [
+        {
+          "subject": "${customTopic}",
+          "topic": "Subtopic or skill",
+          "duration": "45 mins",
+          "activity": "Study + practice"
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- All sessions must relate to ${customTopic}
+- Progress from basics to advanced
+- Include varied activities: reading, practice, self-test
+- Sessions 30-60 mins
+- Build understanding progressively over ${daysAvailable} days`;
+  } else if (mode === 'ai') {
+    prompt = `Create a ${daysAvailable}-day personalised study plan for a student preparing for WAEC/JAMB.
+Based on the student's performance data, pick the most urgent subjects and topics that need attention.
+
+Subjects and scores: ${subjects.map((s, i) => `${s} (${weakTopics[i] || 'needs focus'})`).join(', ')}
+
+Return JSON only:
+{
+  "plan": [
+    {
+      "day": 1,
+      "date": "Monday",
+      "sessions": [
+        {
+          "subject": "Subject name",
+          "topic": "Urgent topic",
+          "duration": "45 mins",
+          "activity": "Targeted review + quiz"
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- Prioritise subjects/topics with lowest scores or least recent activity
+- If one subject is clearly weakest, spend more days on it
+- Mix subjects if multiple need attention
+- Sessions 30-60 mins
+- Balance focused practice with review`;
+  } else {
+    prompt = `Create a ${daysAvailable}-day personalised study plan for a student preparing for WAEC/JAMB.
+Cover all subjects, prioritising weak areas first.
+
+All subjects: ${subjects.join(', ') || 'General studies'}
+Weak topics: ${weakTopics.join(', ') || 'General review'}
+
+Return JSON only:
+{
+  "plan": [
+    {
+      "day": 1,
+      "date": "Monday",
+      "sessions": [
+        {
+          "subject": "Subject name",
+          "topic": "Topic name",
+          "duration": "45 mins",
+          "activity": "Review notes + take quiz"
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- Cover all subjects across the ${daysAvailable} days
+- Prioritise weak topics first
+- Rotate subjects to avoid burnout
+- Sessions 30-60 mins
+- Include varied activities: review, quiz, flashcards, practice`;
+  }
+
+  const res = await createWithRotation({
+    model: 'qwen/qwen3.6-27b',
+    messages: [{
+      role: 'user',
+      content: prompt
     }],
     temperature: 0.4,
     reasoning_effort: 'none',
     max_tokens: 2000
   })
   const result = extractJson(res.choices[0].message.content)
-  // qwen sometimes returns a bare session/day object instead of the wrapper
   if (result && !Array.isArray(result.plan)) {
     if (Array.isArray(result)) return { plan: result }
     return { plan: [result] }
