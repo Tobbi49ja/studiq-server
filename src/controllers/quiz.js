@@ -1,6 +1,6 @@
 import Quiz from '../models/Quiz.js';
 import Note from '../models/Note.js';
-import { generateFeedback } from '../utils/ai.js';
+import { generateFeedback, sendAiError } from '../utils/ai.js';
 
 // GET /api/quiz — list the user's quizzes with note titles/subjects
 export async function listQuizzes(req, res, next) {
@@ -29,7 +29,7 @@ export async function listQuizzes(req, res, next) {
 
     res.json({ data });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -45,7 +45,7 @@ export async function getQuiz(req, res, next) {
     if (err.name === 'CastError') {
       return res.status(404).json({ error: 'Quiz not found' });
     }
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -66,6 +66,6 @@ export async function postFeedback(req, res, next) {
 
     res.json({ data: { feedback } });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }

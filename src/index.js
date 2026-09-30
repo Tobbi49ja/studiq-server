@@ -11,7 +11,7 @@ import subjectRoutes from './routes/subjects.js';
 import askRoutes from './routes/ask.js';
 import contactRoutes from './routes/contact.js';
 import adminRoutes from './routes/admin.js';
-import { logAiConfig } from './utils/ai.js';
+import { logAiConfig, validateModels, getActiveModel } from './utils/ai.js';
 
 dotenv.config();
 
@@ -25,8 +25,15 @@ app.use(
 );
 app.use(express.json({ limit: '10mb' }));
 
+// Health check — no auth, no Groq call (so monitor pings never burn API quota)
+// and never any key material.
 app.get('/api/health', (req, res) => {
-  res.json({ data: { status: 'ok', service: 'studiq-server' } });
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    db: mongoose.connection.readyState, // 0 disconnected 1 connected 2 connecting 3 disconnecting
+    model: getActiveModel()
+  });
 });
 
 app.use('/api/auth', authRoutes);
@@ -91,6 +98,8 @@ async function start() {
   }
 
   logAiConfig();
+  // Fire-and-forget: never blocks or crashes startup on a network hiccup.
+  validateModels().catch(() => {});
 
   app.listen(PORT, () => {
     console.log(`Studiq API running on http://localhost:${PORT}`);

@@ -1,4 +1,4 @@
-import { askStudiqAI } from '../utils/ai.js';
+import { askStudiqAI, sendAiError } from '../utils/ai.js';
 import Performance from '../models/Performance.js';
 import Note from '../models/Note.js';
 import { findRelevantChunks } from '../utils/vector.js';
@@ -78,6 +78,6 @@ ${sources.length ? `- Source: ${sources.join(', ')}` : ''}
     const answer = await askStudiqAI(question.trim(), context);
     res.json({ data: { answer } });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }

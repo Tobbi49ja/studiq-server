@@ -2,7 +2,7 @@ import Performance from '../models/Performance.js';
 import Quiz from '../models/Quiz.js';
 import Note from '../models/Note.js';
 import StudyPlan from '../models/StudyPlan.js';
-import { generateStudyPlan } from '../utils/ai.js';
+import { generateStudyPlan, sendAiError } from '../utils/ai.js';
 import { audit } from '../utils/audit.js';
 
 // POST /api/performance — grade answers, save record
@@ -64,7 +64,7 @@ export async function submitPerformance(req, res, next) {
       }
     });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -115,7 +115,7 @@ export async function getSummary(req, res, next) {
 
     res.json({ data });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -144,7 +144,7 @@ export async function getHistory(req, res, next) {
 
     res.json({ data });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -256,6 +256,6 @@ export async function generatePlan(req, res, next) {
       }
     });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }

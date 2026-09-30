@@ -2,7 +2,7 @@ import pdfParse from 'pdf-parse';
 import Note from '../models/Note.js';
 import Quiz from '../models/Quiz.js';
 import Performance from '../models/Performance.js';
-import { summariseNotes, generateQuiz, explainConcept, generateFlashcards } from '../utils/ai.js';
+import { summariseNotes, generateQuiz, explainConcept, generateFlashcards, sendAiError } from '../utils/ai.js';
 import { audit } from '../utils/audit.js';
 import { chunkText, estimateTokens } from '../utils/chunking.js';
 import { extractKeyTerms } from '../utils/vector.js';
@@ -133,7 +133,7 @@ export async function uploadNote(req, res, next) {
       }
     });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -145,7 +145,7 @@ export async function listNotes(req, res, next) {
       .select('_id title subject topics createdAt');
     res.json({ data: notes });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -159,7 +159,7 @@ export async function explainNote(req, res, next) {
     const explanation = await explainConcept(concept.trim(), (subject || 'General').trim());
     res.json({ data: { explanation } });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }
 
@@ -193,6 +193,6 @@ export async function getFlashcards(req, res, next) {
       }
     });
   } catch (err) {
-    next(err);
+    sendAiError(err, res, next);
   }
 }

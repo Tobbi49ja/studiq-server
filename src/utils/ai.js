@@ -1,4 +1,4 @@
-﻿import Groq from 'groq-sdk'
+import Groq from 'groq-sdk'
 import dotenv from 'dotenv'
 import { fileURLToPath } from 'url'
 import path from 'path'
@@ -10,6 +10,11 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') })
 // The previously hardcoded model id does not exist on Groq and made every call
 // fail with 404 model_not_found.
 const MODEL = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b'
+
+// Second line of defence: if the primary model id is retired, renamed, or simply
+// not served on our Groq account, every AI feature would fail at once. This model
+// is tried once automatically so the product stays up while GROQ_MODEL is fixed.
+const FALLBACK_MODEL = process.env.GROQ_FALLBACK_MODEL || 'openai/gpt-oss-120b'
 
 // Support multiple Groq keys — rotate to the next one when the current key is
 // unusable. GROQ_API_KEY is the primary; GROQ_API_KEY_2.._N are fallbacks.
@@ -24,6 +29,9 @@ const groqKeys = [
 
 const clients = groqKeys.map((apiKey) => new Groq({ apiKey }))
 let keyIndex = 0
+// Tracks which model actually served the last successful call (it may be the
+// fallback). Reported by /api/health so operators can see a degraded state.
+let activeModel = MODEL
 
 // Never log key material — only the 1-based position of the key in use.
 function keyLabel(i) {
@@ -61,48 +69,145 @@ function shouldRotate(err) {
   )
 }
 
-// Message for the fatal (non-rotating) failures, with an actionable hint.
-function describeFatal(err) {
-  const status = errorStatus(err)
-  const code = errorCode(err)
-  const detail = String(err?.error?.message || err?.message || 'unknown error')
-  if (status === 404 || /model_not_found/i.test(code || detail)) {
-    return `Groq model_not_found (404) for model "${MODEL}". Set GROQ_MODEL in server/.env to a model your Groq account can access (default: qwen/qwen3.8-27b).`
-  }
-  if (status === 400 || /invalid_request_error/i.test(errorType(err))) {
-    return `Groq rejected the request (400 invalid_request_error) on model "${MODEL}": ${detail}`
-  }
-  if (status === 401 || status === 403) {
-    return `Groq auth error (${status}): ${detail}`
-  }
-  return `Groq request failed (${status || 'no status'}): ${detail}`
+// User-facing HTTP status for a provider failure. Auth/quota/network problems
+// are transient, and a malformed request or a missing model is our own
+// misconfiguration — both surface as 503 so the client shows one friendly
+// message and the real cause stays in the server log.
+function aiError(message, { status = 503, cause = null } = {}) {
+  const err = new Error(message)
+  err.status = status
+  err.isAiProvider = true
+  if (cause) err.cause = cause
+  return err
 }
 
-// Single shared call site for every helper in this module. Each configured key
-// is tried at most once; there is no unbounded retry loop.
-async function createWithRotation(params) {
-  if (!clients.length) {
-    throw new Error('No Groq API keys configured — set GROQ_API_KEY (optionally _2/_3/_4) in server/.env')
+// Unwrap the chain so classification still sees the original SDK error.
+function rootErr(err) {
+  let cur = err
+  const seen = new Set()
+  while (cur && !seen.has(cur)) {
+    seen.add(cur)
+    if (cur.isAiProvider && cur.cause) cur = cur.cause
+    else break
   }
+  return cur
+}
 
+// Groq answers an unknown/retired model id with 404 model_not_found. Nothing
+// about that is key-specific, so this is the only case worth a *model* change.
+// Every Groq error we see comes from /chat/completions, where a 404 is in
+// practice always a bad model id — so the status alone is enough to trigger it.
+function isModelNotFound(err) {
+  const raw = rootErr(err)
+  if (errorStatus(raw) === 404) return true
+  const code = errorCode(raw)
+  const detail = String(raw?.error?.message || raw?.message || '')
+  return /model_not_found/i.test(`${code || ''} ${detail}`)
+}
+
+function modelOf(params) {
+  return params?.model || MODEL
+}
+
+// Params that are not portable across Groq models. `reasoning_effort` is a
+// qwen-family parameter: gpt-oss rejects unknown fields with a 400, so it is
+// stripped for the fallback rather than letting every call double-fault.
+const NON_PORTABLE_PARAMS = ['reasoning_effort', 'response_format', 'top_k']
+
+// Single place where per-model param differences are resolved.
+function buildParams(params, model) {
+  const next = { ...params, model }
+  if (model !== MODEL) {
+    for (const key of NON_PORTABLE_PARAMS) delete next[key]
+  }
+  return next
+}
+
+// Message for the fatal (non-rotating) failures, with an actionable hint.
+function describeFatal(err, model = MODEL) {
+  const raw = rootErr(err)
+  const status = errorStatus(raw)
+  const code = errorCode(raw)
+  const detail = String(raw?.error?.message || raw?.message || 'unknown error')
+  if (status === 404 || /model_not_found/i.test(`${code || ''} ${detail}`)) {
+    return `Groq model_not_found (404) for model "${model}". Set GROQ_MODEL in server/.env to a model your Groq account can access (see .env.example for the verification command).`
+  }
+  if (status === 400 || /invalid_request_error/i.test(errorType(raw))) {
+    return `Groq rejected the request (400 invalid_request_error) on model "${model}": ${detail}`
+  }
+  if (status === 401 || status === 403) {
+    return `Groq auth error (${status}) on model "${model}": ${detail}`
+  }
+  return `Groq request failed (${status || 'no status'}) on model "${model}": ${detail}`
+}
+
+// One pass over the configured keys for a single model. Rotation rules are
+// unchanged: 429 / 401 / 403 / 5xx / network advance to the next key, and each
+// key is tried at most once.
+async function callWithKeyRotation(params) {
+  const model = modelOf(params)
   let lastErr = null
   for (let attempt = 0; attempt < clients.length; attempt++) {
     try {
-      return await clients[keyIndex % clients.length].chat.completions.create(params)
+      const res = await clients[keyIndex % clients.length].chat.completions.create(params)
+      activeModel = model
+      return res
     } catch (err) {
       lastErr = err
       if (!shouldRotate(err)) {
-        throw new Error(describeFatal(err))
+        throw aiError(describeFatal(err, model), { status: 503, cause: err })
       }
       keyIndex = (keyIndex + 1) % clients.length
       console.warn(
-        `Groq ${errorStatus(err) || 'network'} error — rotating to ${keyLabel(keyIndex)} of ${clients.length}`
+        `[ai] Groq ${errorStatus(err) || 'network'} error on "${model}" — rotating to ${keyLabel(keyIndex)} of ${clients.length}`
       )
     }
   }
-  throw new Error(
-    `All ${clients.length} Groq API key(s) failed (${describeFatal(lastErr)})`
+  throw aiError(
+    `All ${clients.length} Groq API key(s) failed for model "${model}" (${describeFatal(lastErr, model)})`,
+    { status: 503, cause: lastErr }
   )
+}
+
+// Single shared call site for every helper in this module. If the primary model
+// is unavailable we retry exactly once on the fallback model, then give up.
+// Key rotation rules are untouched; only the model changes on a 404.
+async function createWithRotation(params) {
+  if (!clients.length) {
+    throw aiError('No Groq API keys configured — set GROQ_API_KEY (optionally _2/_3/_4) in server/.env', {
+      status: 503
+    })
+  }
+
+  const primary = modelOf(params)
+  try {
+    return await callWithKeyRotation(params)
+  } catch (err) {
+    const canFallBack =
+      isModelNotFound(err) && FALLBACK_MODEL && FALLBACK_MODEL !== primary
+    if (!canFallBack) throw err
+
+    console.warn(`[ai] Primary model ${primary} unavailable, using fallback ${FALLBACK_MODEL}`)
+    try {
+      return await callWithKeyRotation(buildParams(params, FALLBACK_MODEL))
+    } catch (fallbackErr) {
+      throw aiError(
+        `Primary model ${primary} is unavailable and fallback ${FALLBACK_MODEL} also failed (${describeFatal(fallbackErr, FALLBACK_MODEL)})`,
+        { status: 503, cause: fallbackErr }
+      )
+    }
+  }
+}
+
+// Controllers use this in their catch blocks so provider internals are logged
+// server-side but never shipped to the browser.
+export function sendAiError(err, res, next) {
+  if (!err?.isAiProvider) return next(err)
+  console.error('[ai] Provider failure:', err.message)
+  return res.status(503).json({
+    error: 'AI is temporarily unavailable, please try again.',
+    code: 503
+  })
 }
 
 // qwen3.8-27b is a reasoning model: the trace may come back in a dedicated
@@ -209,12 +314,70 @@ function stripReasoning(raw) {
 
 // Startup diagnostics: report configuration health without ever revealing a
 // key value. Safe to call from the server bootstrap.
+export function getActiveModel() {
+  return activeModel
+}
+
 export function logAiConfig() {
   const count = clients.length
   if (!count) {
     console.warn('[ai] WARNING: no Groq API keys configured — AI features will fail. Set GROQ_API_KEY (optionally GROQ_API_KEY_2..4) in server/.env')
   } else {
-    console.log(`[ai] Groq ready: ${count} key(s) configured, active model "${MODEL}"`)
+    console.log(
+      `[ai] Groq ready: ${count} key(s) configured, model "${MODEL}", fallback "${FALLBACK_MODEL}"`
+    )
+  }
+}
+
+// Non-text models that would be useless as a chat replacement.
+function isTextGenerationModel(id) {
+  return !/(whisper|guard|tts|playai|audio|whisper-large|text-to-speech)/i.test(id)
+}
+
+// Ask Groq which models our key can actually reach and warn loudly about any
+// id we are about to use that is missing. Fire-and-forget: it never throws,
+// never blocks startup, and never logs key material.
+export async function validateModels() {
+  if (!clients.length) return
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
+
+  try {
+    const key = groqKeys[keyIndex % groqKeys.length]
+    const res = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: controller.signal
+    })
+
+    if (!res.ok) {
+      console.warn(`[ai] Could not verify models (HTTP ${res.status}) — skipping model validation.`)
+      return
+    }
+
+    const data = await res.json()
+    const ids = (data?.data || []).map((m) => m?.id).filter(Boolean)
+    const idSet = new Set(ids)
+    const missing = [MODEL, FALLBACK_MODEL].filter((m) => m && !idSet.has(m))
+
+    if (!ids.length) return
+
+    if (missing.length) {
+      const suggestions = ids.filter(isTextGenerationModel).slice(0, 8)
+      console.warn(
+        `[ai] WARNING: configured model id(s) not available on this Groq account: ${missing.join(', ')}`
+      )
+      console.warn(`[ai] Valid model ids include: ${suggestions.join(', ') || '(none reported)'}`)
+      if (missing.includes(MODEL) && !missing.includes(FALLBACK_MODEL)) {
+        console.warn(`[ai] Requests will auto-fallback to ${FALLBACK_MODEL} until GROQ_MODEL is corrected.`)
+      }
+    } else {
+      console.log(`[ai] Model check passed: "${MODEL}" and fallback "${FALLBACK_MODEL}" are available.`)
+    }
+  } catch (err) {
+    console.warn(`[ai] Model check skipped: ${err?.message || 'unknown error'}`)
+  } finally {
+    clearTimeout(timer)
   }
 }
 
