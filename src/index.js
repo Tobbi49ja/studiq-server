@@ -11,6 +11,7 @@ import subjectRoutes from './routes/subjects.js';
 import askRoutes from './routes/ask.js';
 import contactRoutes from './routes/contact.js';
 import adminRoutes from './routes/admin.js';
+import { logAiConfig } from './utils/ai.js';
 
 dotenv.config();
 
@@ -88,6 +89,8 @@ async function start() {
     console.error('Failed to connect to MongoDB (Atlas and local).');
     process.exit(1);
   }
+
+  logAiConfig();
 
   app.listen(PORT, () => {
     console.log(`Studiq API running on http://localhost:${PORT}`);

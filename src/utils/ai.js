@@ -6,44 +6,114 @@ import path from 'path'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.resolve(__dirname, '../../.env') })
 
+// The single source of truth for the Groq model. Set GROQ_MODEL to override.
+// The previously hardcoded model id does not exist on Groq and made every call
+// fail with 404 model_not_found.
+const MODEL = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b'
+
 // Support multiple Groq keys — rotate to the next one when the current key is
-// rate-limited. GROQ_API_KEY is the primary; GROQ_API_KEY_2.._N are fallbacks.
+// unusable. GROQ_API_KEY is the primary; GROQ_API_KEY_2.._N are fallbacks.
+// Unset/blank vars are dropped here so they can never be sent as a
+// "Bearer undefined" token.
 const groqKeys = [
   process.env.GROQ_API_KEY,
   process.env.GROQ_API_KEY_2,
   process.env.GROQ_API_KEY_3,
   process.env.GROQ_API_KEY_4
-].filter(Boolean)
+].filter((k) => typeof k === 'string' && k.trim() && k.trim().toLowerCase() !== 'undefined')
 
 const clients = groqKeys.map((apiKey) => new Groq({ apiKey }))
 let keyIndex = 0
 
-function currentClient() {
-  return clients[keyIndex % clients.length]
+// Never log key material — only the 1-based position of the key in use.
+function keyLabel(i) {
+  return `key #${i + 1}`
 }
 
-function isRateLimit(err) {
-  const status = err?.status || err?.response?.status
-  return status === 429 || /rate.?limit/i.test(String(err?.message || ''))
+function errorStatus(err) {
+  return err?.status || err?.statusCode || err?.response?.status || undefined
 }
 
-// Call the given chat.completions.create with key rotation: on a 429 rate-limit
-// error, advance to the next key and retry once.
+function errorCode(err) {
+  return err?.error?.code || err?.code || undefined
+}
+
+function errorType(err) {
+  return String(err?.error?.type || err?.type || '')
+}
+
+// Only credential/quota/transport failures are worth spending another key on.
+// A 404 model_not_found or a 400 invalid_request_error fails identically on
+// every key, so rotating there just burns the whole pool for nothing.
+function shouldRotate(err) {
+  const status = errorStatus(err)
+  if (status === 429) return true
+  if (status === 401 || status === 403) return true
+  if (status >= 500) return true
+  if (status === 404 || status === 400 || status === 422) return false
+  if (status) return false
+  // No HTTP status at all: treat as a network/transport fault.
+  const code = errorCode(err) || ''
+  const msg = String(err?.message || '')
+  return (
+    /fetch failed|network|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up/i.test(msg) ||
+    ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'UND_ERR_SOCKET'].includes(code)
+  )
+}
+
+// Message for the fatal (non-rotating) failures, with an actionable hint.
+function describeFatal(err) {
+  const status = errorStatus(err)
+  const code = errorCode(err)
+  const detail = String(err?.error?.message || err?.message || 'unknown error')
+  if (status === 404 || /model_not_found/i.test(code || detail)) {
+    return `Groq model_not_found (404) for model "${MODEL}". Set GROQ_MODEL in server/.env to a model your Groq account can access (default: qwen/qwen3.8-27b).`
+  }
+  if (status === 400 || /invalid_request_error/i.test(errorType(err))) {
+    return `Groq rejected the request (400 invalid_request_error) on model "${MODEL}": ${detail}`
+  }
+  if (status === 401 || status === 403) {
+    return `Groq auth error (${status}): ${detail}`
+  }
+  return `Groq request failed (${status || 'no status'}): ${detail}`
+}
+
+// Single shared call site for every helper in this module. Each configured key
+// is tried at most once; there is no unbounded retry loop.
 async function createWithRotation(params) {
+  if (!clients.length) {
+    throw new Error('No Groq API keys configured — set GROQ_API_KEY (optionally _2/_3/_4) in server/.env')
+  }
+
+  let lastErr = null
   for (let attempt = 0; attempt < clients.length; attempt++) {
     try {
-      const res = await currentClient().chat.completions.create(params)
-      return res
+      return await clients[keyIndex % clients.length].chat.completions.create(params)
     } catch (err) {
-      if (isRateLimit(err)) {
-        keyIndex = (keyIndex + 1) % clients.length
-        console.warn(`Groq rate limit — rotating to key ${keyIndex + 1}/${clients.length}`)
-        continue
+      lastErr = err
+      if (!shouldRotate(err)) {
+        throw new Error(describeFatal(err))
       }
-      throw err
+      keyIndex = (keyIndex + 1) % clients.length
+      console.warn(
+        `Groq ${errorStatus(err) || 'network'} error — rotating to ${keyLabel(keyIndex)} of ${clients.length}`
+      )
     }
   }
-  throw new Error('All Groq API keys are rate-limited or exhausted')
+  throw new Error(
+    `All ${clients.length} Groq API key(s) failed (${describeFatal(lastErr)})`
+  )
+}
+
+// qwen3.8-27b is a reasoning model: the trace may come back in a dedicated
+// field rather than inside `content`. Prefer `content`, and fall back to the
+// reasoning field so only text that actually exists is ever parsed/stripped.
+function messageContent(res) {
+  const msg = res?.choices?.[0]?.message || {}
+  const content = typeof msg.content === 'string' ? msg.content.trim() : ''
+  if (content) return content
+  const reasoning = msg.reasoning_content || msg.reasoning || ''
+  return typeof reasoning === 'string' ? reasoning : ''
 }
 
 // Strip the model's <think> reasoning block (including unclosed ones),
@@ -137,9 +207,20 @@ function stripReasoning(raw) {
   return text.replace(/\s*\n{3,}/g, '\n\n').trim()
 }
 
+// Startup diagnostics: report configuration health without ever revealing a
+// key value. Safe to call from the server bootstrap.
+export function logAiConfig() {
+  const count = clients.length
+  if (!count) {
+    console.warn('[ai] WARNING: no Groq API keys configured — AI features will fail. Set GROQ_API_KEY (optionally GROQ_API_KEY_2..4) in server/.env')
+  } else {
+    console.log(`[ai] Groq ready: ${count} key(s) configured, active model "${MODEL}"`)
+  }
+}
+
 export async function summariseNotes(rawText) {
   const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
+    model: MODEL,
     messages: [{
       role: 'user',
       content: `Analyse these study notes. Return JSON only, no markdown, no backticks:
@@ -165,12 +246,12 @@ ${rawText}`
     reasoning_effort: 'none',
     max_tokens: 2048
   })
-  return extractJson(res.choices[0].message.content)
+  return extractJson(messageContent(res))
 }
 
 export async function generateQuiz(summary, topics, count = 10, difficulty = 'medium') {
   const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
+    model: MODEL,
     messages: [{
       role: 'user',
       content: `Generate exactly ${count} WAEC/JAMB level MCQ questions from this content.
@@ -205,7 +286,7 @@ Topics: ${topics.join(', ')}`
     reasoning_effort: 'none',
     max_tokens: 3000
   })
-  const result = extractJson(res.choices[0].message.content)
+  const result = extractJson(messageContent(res))
   // qwen sometimes returns a bare question object/array instead of the wrapper
   if (Array.isArray(result)) return { questions: result }
   if (result && !Array.isArray(result.questions)) {
@@ -216,7 +297,7 @@ Topics: ${topics.join(', ')}`
 
 export async function explainConcept(concept, subject) {
   const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
+    model: MODEL,
     messages: [{
       role: 'user',
       content: `You are StudyMate, Studiq's academic tutor. You answer ONLY academic
@@ -238,12 +319,12 @@ Rules:
     reasoning_effort: 'none',
     max_tokens: 4000
   })
-  return stripReasoning(res.choices[0].message.content)
+  return stripReasoning(messageContent(res))
 }
 
 export async function generateFlashcards(keyPoints, subject) {
   const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
+    model: MODEL,
     messages: [{
       role: 'user',
       content: `Create flashcards from these key points. 
@@ -260,7 +341,7 @@ Subject: ${subject}`
     reasoning_effort: 'none',
     max_tokens: 2000
   })
-  const result = extractJson(res.choices[0].message.content)
+  const result = extractJson(messageContent(res))
   // qwen sometimes returns a bare flashcard array/object instead of the wrapper
   if (Array.isArray(result)) return { flashcards: result }
   if (result && !Array.isArray(result.flashcards)) {
@@ -271,7 +352,7 @@ Subject: ${subject}`
 
 export async function generateFeedback(question, correctAnswer, userAnswer, explanation) {
   const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
+    model: MODEL,
     messages: [{
       role: 'user',
       content: `A student answered a quiz question wrong.
@@ -292,7 +373,7 @@ Rules:
     reasoning_effort: 'none',
     max_tokens: 4000
   })
-  return stripReasoning(res.choices[0].message.content)
+  return stripReasoning(messageContent(res))
 }
 
 export async function generateStudyPlan(weakTopics, subjects, daysAvailable, mode = 'all', selectedSubject = '', customTopic = '') {
@@ -418,7 +499,7 @@ Rules:
   }
 
   const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
+    model: MODEL,
     messages: [{
       role: 'user',
       content: prompt
@@ -427,7 +508,7 @@ Rules:
     reasoning_effort: 'none',
     max_tokens: 2000
   })
-  const result = extractJson(res.choices[0].message.content)
+  const result = extractJson(messageContent(res))
   if (result && !Array.isArray(result.plan)) {
     if (Array.isArray(result)) return { plan: result }
     return { plan: [result] }
@@ -439,7 +520,7 @@ Rules:
 // (subjects, recent topics, and quiz performance) when available.
 export async function askStudiqAI(question, context) {
   const res = await createWithRotation({
-    model: 'qwen/qwen3.6-27b',
+    model: MODEL,
     messages: [
       {
         role: 'system',
@@ -476,5 +557,5 @@ Rules:
     reasoning_effort: 'none',
     max_tokens: 1024
   })
-  return stripReasoning(res.choices[0].message.content).trim()
+  return stripReasoning(messageContent(res)).trim()
 }
